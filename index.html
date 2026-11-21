@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrollEraser – Paper Watermark Remover</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/ort.min.js" defer></script>
+<style>
+  :root{--bg:#f4f5f7;--card:#fff;--ink:#1d2330;--muted:#6b7280;--accent:#2f6fed;--line:#e3e6eb;--troll:#3a9d5d}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:22px 20px 6px;text-align:center}
+  h1{margin:0;font-size:26px}
+  header p{margin:6px 0 0;color:var(--muted);font-size:14px}
+  .tabs{display:flex;gap:6px;justify-content:center;margin:14px 0 0}
+  .tab{width:auto;margin:0;padding:10px 20px;border-radius:999px;background:#e6e9ef;color:var(--ink)}
+  .tab.on{background:var(--troll);color:#fff}
+  .wrap{max-width:1240px;margin:0 auto;padding:16px;display:grid;grid-template-columns:310px minmax(0,1fr);gap:16px}
+  @media(max-width:820px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .drop{border:2px dashed #b8c2d3;border-radius:10px;padding:20px 12px;text-align:center;cursor:pointer;color:var(--muted);font-size:14px}
+  .drop.over{border-color:var(--accent);background:#eef3ff}
+  .ctl{margin-top:16px}
+  .ctl label{display:flex;justify-content:space-between;font-size:14px;font-weight:600}
+  .ctl small,.hint{display:block;color:var(--muted);font-size:12px;margin-top:2px;line-height:1.4}
+  input[type=range]{width:100%;margin-top:6px}
+  .chk{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin-top:14px}
+  .chk input{margin-top:3px}
+  button{width:100%;padding:11px;border-radius:9px;border:0;font-size:15px;font-weight:600;cursor:pointer;margin-top:12px}
+  .primary{background:var(--accent);color:#fff}
+  .green{background:var(--troll);color:#fff}
+  .ghost{background:#eef0f4;color:var(--ink)}
+  .row{display:flex;gap:8px}.row button{flex:1}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .stage{display:flex;align-items:center;justify-content:center;min-height:440px;overflow:auto}
+  .stage canvas{max-width:100%;height:auto;background:#fff}
+  #out{box-shadow:0 2px 12px rgba(0,0,0,.12)}
+  .paint{position:relative;display:inline-block;max-width:100%;box-shadow:0 2px 12px rgba(0,0,0,.12);line-height:0}
+  .paint canvas{display:block}
+  #aiMask{position:absolute;left:0;top:0;width:100%;height:100%;cursor:crosshair;touch-action:none;opacity:.5}
+  .empty{color:var(--muted);text-align:center}
+  .note{font-size:12px;color:var(--muted);margin-top:14px;line-height:1.45}
+  .badge{font-weight:400;color:var(--muted)}
+  .sec{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
+  .sec h3{margin:0 0 4px;font-size:15px}
+  .bar{height:8px;background:#e6e9ef;border-radius:9px;overflow:hidden;margin-top:10px;display:none}
+  .bar i{display:block;height:100%;width:0;background:var(--troll);transition:width .2s}
+  .status{font-size:13px;margin-top:8px;min-height:18px;color:var(--muted)}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <h1>TrollEraser 🧌</h1>
+  <p><b>Watermark gone, text stays.</b> Everything runs in your browser. Nothing is uploaded, and there are no limits.</p>
+  <div class="tabs">
+    <button class="tab on" data-tab="manual">✨ Manual (Auto Clean)</button>
+    <button class="tab" data-tab="ai">🖌️ AI Brush</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="drop" id="drop">
+      <b>Drop an image here</b><br>or click to choose<br><span style="font-size:12px">(you can also paste with Ctrl+V)</span>
+      <input type="file" id="file" accept="image/*" hidden>
+    </div>
+
+    <!-- ===== MANUAL PANEL ===== -->
+    <div id="pManual">
+      <div class="ctl">
+        <label>Watermark removal strength <span class="badge" id="vStrength"></span></label>
+        <input type="range" id="strength" min="0" max="100" value="55">
+        <small>Increase if the watermark is still visible. Decrease if the text starts to fade.</small>
+      </div>
+      <div class="ctl">
+        <label>Text darkness <span class="badge" id="vDark"></span></label>
+        <input type="range" id="dark" min="0" max="100" value="35">
+        <small>Makes the text blacker and sharper.</small>
+      </div>
+      <label class="chk"><input type="checkbox" id="bgfix" checked>
+        <span>Fix shadows and lighting<br><small class="hint">For photos taken with a phone</small></span></label>
+      <label class="chk"><input type="checkbox" id="color" checked>
+        <span>Remove colored watermarks<br><small class="hint">Red, blue or green watermarks and logos. Turn off if the page has colored text.</small></span></label>
+      <div class="ctl" id="satBox">
+        <label>Color sensitivity <span class="badge" id="vSat"></span></label>
+        <input type="range" id="sat" min="0" max="100" value="50">
+      </div>
+
+      <button class="ghost" id="hold" disabled>Hold to see original</button>
+      <button class="primary" id="dl" disabled>Download (PNG)</button>
+      <button class="ghost" id="toAi" disabled>Send this result to AI Brush →</button>
+
+      <div class="sec">
+        <h3>📦 Batch: many images at once</h3>
+        <small class="hint">Tune the settings above on one image, then choose all your images. They will download together as one ZIP.</small>
+        <button class="green" id="batchBtn">Choose images & create ZIP</button>
+        <input type="file" id="batchFiles" accept="image/*" multiple hidden>
+        <div class="bar" id="batchBar"><i></i></div>
+        <div class="status" id="batchStatus"></div>
+      </div>
+    </div>
+
+    <!-- ===== AI PANEL ===== -->
+    <div id="pAi" hidden>
+      <div class="ctl">
+        <label>Brush size <span class="badge" id="vBrush"></span></label>
+        <input type="range" id="brush" min="4" max="120" value="30">
+        <small>Paint over the watermark (shown in red), then click "Erase with AI".</small>
+      </div>
+      <div class="row">
+        <button class="ghost" id="clearMask" disabled>Clear brush</button>
+        <button class="ghost" id="undo" disabled>↶ Undo</button>
+      </div>
+      <button class="green" id="aiRun" disabled>🧌 Erase with AI</button>
+      <div class="bar" id="aiBar"><i></i></div>
+      <div class="status" id="aiStatus"></div>
+      <button class="primary" id="aiDl" disabled>Download (PNG)</button>
+      <p class="note"><b>Note:</b> AI erases <i>everything</i> under the brush and fills in the background, including text. Only paint areas without text, such as logos, stamps or corner watermarks. For watermarks that run across text, the <b>Manual</b> tab works better.<br><br>The AI model (~200MB) downloads once on first use, then stays saved in your browser.</p>
+    </div>
+  </div>
+
+  <div class="card stage" id="stage">
+    <div class="empty" id="empty">No image yet.<br>Upload one from the panel on the left.</div>
+    <canvas id="out" hidden></canvas>
+    <div class="paint" id="paint" hidden>
+      <canvas id="aiBase"></canvas>
+      <canvas id="aiMask"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+{
+  const $ = id => document.getElementById(id);
+  const MAX_SIDE = 5000;
+  const MODEL_URL = 'https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx';
+  const MODEL_SIZE = 208044816;
+  const LAMA = 512;
+
+  const out = $('out'), octx = out.getContext('2d');
+  const aiBase = $('aiBase'), bctx = aiBase.getContext('2d');
+  const aiMask = $('aiMask'), mctx = aiMask.getContext('2d');
+  const ctl = { strength:$('strength'), dark:$('dark'), sat:$('sat'), bgfix:$('bgfix'), color:$('color') };
+
+  let src = null, result = null, bgCache = null, timer = null;
+  let tab = 'manual', aiLoaded = false, undoStack = [], session = null, busy = false;
+
+  // ================= helpers =================
+  function fileToImageData(file){
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(file), img = new Image();
+      img.onload = () => {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const k = Math.min(1, MAX_SIDE / Math.max(w, h));
+        w = Math.round(w*k); h = Math.round(h*k);
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        const cx = c.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0,0,w,h); cx.drawImage(img,0,0,w,h);
+        URL.revokeObjectURL(url); res(cx.getImageData(0,0,w,h));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Could not open this image')); };
+      img.src = url;
+    });
+  }
+  function toCanvas(id){ const c = document.createElement('canvas'); c.width = id.width; c.height = id.height; c.getContext('2d').putImageData(id,0,0); return c; }
+  function canvasBlob(c){ return new Promise(r => c.toBlob(r, 'image/png')); }
+  function saveBlob(blob, name){
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  }
+  function setBar(id, f){ const b = $(id); b.style.display = f == null ? 'none' : 'block'; if (f != null) b.firstElementChild.style.width = (f*100).toFixed(1)+'%'; }
+
+  // ================= manual cleaning engine =================
+  function grayOf(id){
+    const d = id.data, g = new Float32Array(id.width*id.height);
+    for (let i=0,p=0;i<g.length;i++,p+=4) g[i] = 0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2];
+    return g;
+  }
+  function maxFilter(a, w, h, r){
+    const t = new Float32Array(a.length), o = new Float32Array(a.length);
+    for (let y=0;y<h;y++) for (let x=0;x<w;x++){ let m=0; for (let k=Math.max(0,x-r);k<=Math.min(w-1,x+r);k++) m=Math.max(m,a[y*w+k]); t[y*w+x]=m; }
+    for (let y=0;y<h;y++) for (let x=0;x<w;x++){ let m=0; for (let k=Math.max(0,y-r);k<=Math.min(h-1,y+r);k++) m=Math.max(m,t[k*w+x]); o[y*w+x]=m; }
+    return o;
+  }
+  function boxBlur(a, w, h, r){
+    const t = new Float32Array(a.length), o = new Float32Array(a.length);
+    for (let y=0;y<h;y++) for (let x=0;x<w;x++){ let s=0,n=0; for (let k=Math.max(0,x-r);k<=Math.min(w-1,x+r);k++){s+=a[y*w+k];n++;} t[y*w+x]=s/n; }
+    for (let y=0;y<h;y++) for (let x=0;x<w;x++){ let s=0,n=0; for (let k=Math.max(0,y-r);k<=Math.min(h-1,y+r);k++){s+=t[k*w+x];n++;} o[y*w+x]=s/n; }
+    return o;
+  }
+  function background(gray, w, h){
+    const s = Math.max(1, Math.round(Math.max(w,h) / 320));
+    const bw = Math.ceil(w/s), bh = Math.ceil(h/s);
+    let small = new Float32Array(bw*bh);
+    for (let y=0;y<h;y++){ const by=(y/s)|0; for (let x=0;x<w;x++){ const v=gray[y*w+x], j=by*bw+((x/s)|0); if (v>small[j]) small[j]=v; } }
+    small = maxFilter(small, bw, bh, 3);
+    small = boxBlur(boxBlur(small, bw, bh, 4), bw, bh, 4);
+    return { small, bw, bh, s };
+  }
+  function settings(){
+    return { strength:+ctl.strength.value, dark:+ctl.dark.value, sat:+ctl.sat.value, bgfix:ctl.bgfix.checked, color:ctl.color.checked };
+  }
+  // cache = {gray, bg} optional (for live preview speed)
+  function clean(id, st, cache){
+    const w = id.width, h = id.height, d = id.data;
+    const gray = cache?.gray || grayOf(id);
+    const bg = st.bgfix ? (cache?.bg || background(gray, w, h)) : null;
+    if (cache){ cache.gray = gray; if (bg) cache.bg = bg; }
+    const white = 250 - st.strength * 1.4, black = st.dark * 1.2, satThr = 0.55 - st.sat * 0.0045;
+    const res = new ImageData(w, h), o = res.data;
+    for (let y=0;y<h;y++){
+      let fy=0,y0=0,y1=0;
+      if (bg){ fy=Math.min(bg.bh-1,Math.max(0,y/bg.s-0.5)); y0=fy|0; y1=Math.min(bg.bh-1,y0+1); fy-=y0; }
+      for (let x=0;x<w;x++){
+        const i=y*w+x, p=i*4; let v=gray[i];
+        if (bg){
+          let fx=Math.min(bg.bw-1,Math.max(0,x/bg.s-0.5)); const x0=fx|0, x1=Math.min(bg.bw-1,x0+1); fx-=x0;
+          const S=bg.small, W=bg.bw;
+          const b=(S[y0*W+x0]*(1-fx)+S[y0*W+x1]*fx)*(1-fy)+(S[y1*W+x0]*(1-fx)+S[y1*W+x1]*fx)*fy;
+          v=Math.min(255, v/Math.max(b,30)*255);
+        }
+        if (st.color){
+          const r=d[p],g=d[p+1],bl=d[p+2], mx=Math.max(r,g,bl), mn=Math.min(r,g,bl);
+          if (mx>70 && (mx-mn)/mx > satThr) v=255;
+        }
+        let ov;
+        if (v>=white) ov=255; else if (v<=black) ov=0; else { const t=(v-black)/(white-black); ov=255*t*t; }
+        o[p]=o[p+1]=o[p+2]=ov; o[p+3]=255;
+      }
+    }
+    return res;
+  }
+
+  // ================= loading =================
+  const drop = $('drop'), fileIn = $('file');
+  drop.onclick = () => fileIn.click();
+  fileIn.onchange = e => { e.target.files[0] && load(e.target.files[0]); fileIn.value=''; };
+  ['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; f && load(f); });
+  window.addEventListener('paste', e => {
+    const it = [...(e.clipboardData?.items||[])].find(i => i.type.startsWith('image/'));
+    it && load(it.getAsFile());
+  });
+
+  async function load(file){
+    try { src = await fileToImageData(file); } catch(err){ alertMsg(err.message); return; }
+    bgCache = {};
+    out.width = src.width; out.height = src.height;
+    $('empty').hidden = true;
+    ['hold','dl','toAi'].forEach(id => $(id).disabled = false);
+    runManual();
+    setAiImage(src);
+    showView();
+  }
+  function alertMsg(m){ (tab==='ai' ? $('aiStatus') : $('batchStatus')).textContent = m; }
+
+  // ================= manual tab =================
+  function runManual(){
+    if (!src) return;
+    const st = settings();
+    $('vStrength').textContent = st.strength; $('vDark').textContent = st.dark; $('vSat').textContent = st.sat;
+    $('satBox').style.display = st.color ? '' : 'none';
+    if (!st.bgfix) bgCache.bg = null;
+    result = clean(src, st, bgCache);
+    octx.putImageData(result, 0, 0);
+  }
+  Object.values(ctl).forEach(el => el.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(runManual, 60); }));
+  runManual();
+
+  const hold = $('hold');
+  hold.addEventListener('pointerdown', () => src && octx.putImageData(src,0,0));
+  ['pointerup','pointerleave','pointercancel'].forEach(t => hold.addEventListener(t, () => result && octx.putImageData(result,0,0)));
+  $('dl').onclick = async () => { octx.putImageData(result,0,0); saveBlob(await canvasBlob(out), 'trolleraser-clean.png'); };
+  $('toAi').onclick = () => { setAiImage(result); switchTab('ai'); $('aiStatus').textContent = 'The cleaned Manual result is now in AI Brush.'; };
+
+  // ---- batch ----
+  $('batchBtn').onclick = () => $('batchFiles').click();
+  $('batchFiles').onchange = async e => {
+    const files = [...e.target.files]; e.target.value = '';
+    if (!files.length) return;
+    if (typeof JSZip === 'undefined'){ $('batchStatus').textContent = 'ZIP library failed to load. Check your internet connection.'; return; }
+    const st = settings(), zip = new JSZip(), btn = $('batchBtn'), used = new Set();
+    btn.disabled = true; let ok = 0;
+    for (let i=0;i<files.length;i++){
+      $('batchStatus').textContent = `Cleaning ${i+1} / ${files.length}: ${files[i].name}`;
+      setBar('batchBar', i/files.length);
+      await new Promise(r => setTimeout(r, 0));
+      try {
+        const id = await fileToImageData(files[i]);
+        const blob = await canvasBlob(toCanvas(clean(id, st)));
+        let name = files[i].name.replace(/\.[^.]+$/, '') + '-clean.png', n = 2;
+        while (used.has(name)) name = files[i].name.replace(/\.[^.]+$/, '') + `-clean-${n++}.png`;
+        used.add(name); zip.file(name, blob); ok++;
+      } catch(err){ console.warn(files[i].name, err); }
+    }
+    $('batchStatus').textContent = 'Creating ZIP…';
+    const zblob = await zip.generateAsync({ type:'blob' }, m => setBar('batchBar', m.percent/100));
+    saveBlob(zblob, `trolleraser-${ok}-images.zip`);
+    setBar('batchBar', null); btn.disabled = false;
+    $('batchStatus').textContent = `✅ ${ok} / ${files.length} images cleaned. ZIP downloaded.`;
+  };
+
+  // ================= tabs =================
+  document.querySelectorAll('.tab').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+  function switchTab(t){
+    tab = t;
+    document.querySelectorAll('.tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+    $('pManual').hidden = t !== 'manual'; $('pAi').hidden = t !== 'ai';
+    showView();
+  }
+  function showView(){
+    const has = !!src;
+    out.hidden = !(has && tab === 'manual');
+    $('paint').hidden = !(has && tab === 'ai');
+  }
+
+  // ================= AI brush tab =================
+  function setAiImage(id){
+    aiBase.width = aiMask.width = id.width; aiBase.height = aiMask.height = id.height;
+    bctx.putImageData(id, 0, 0); mctx.clearRect(0,0,aiMask.width,aiMask.height);
+    undoStack = []; aiLoaded = true; updateAiButtons();
+  }
+  function updateAiButtons(){
+    $('clearMask').disabled = !aiLoaded || busy; $('aiRun').disabled = !aiLoaded || busy;
+    $('aiDl').disabled = !aiLoaded || busy; $('undo').disabled = !undoStack.length || busy;
+  }
+  const brush = $('brush'); const showBrush = () => $('vBrush').textContent = brush.value; brush.oninput = showBrush; showBrush();
+
+  let drawing = false, last = null;
+  function pt(e){ const r = aiMask.getBoundingClientRect(), k = aiMask.width / r.width; return { x:(e.clientX-r.left)*k, y:(e.clientY-r.top)*k, k }; }
+  function stroke(a, b){
+    mctx.strokeStyle = mctx.fillStyle = '#ff2d2d'; mctx.lineCap = mctx.lineJoin = 'round';
+    mctx.lineWidth = brush.value * b.k;
+    mctx.beginPath(); mctx.moveTo(a.x, a.y); mctx.lineTo(b.x, b.y); mctx.stroke();
+  }
+  aiMask.addEventListener('pointerdown', e => { if (busy) return; drawing = true; aiMask.setPointerCapture(e.pointerId); last = pt(e); stroke(last, last); });
+  aiMask.addEventListener('pointermove', e => { if (!drawing) return; const p = pt(e); stroke(last, p); last = p; });
+  ['pointerup','pointercancel'].forEach(t => aiMask.addEventListener(t, () => drawing = false));
+  $('clearMask').onclick = () => mctx.clearRect(0,0,aiMask.width,aiMask.height);
+  $('undo').onclick = () => { const prev = undoStack.pop(); if (prev) bctx.putImageData(prev,0,0); updateAiButtons(); };
+  $('aiDl').onclick = async () => saveBlob(await canvasBlob(aiBase), 'trolleraser-ai-clean.png');
+
+  async function getSession(){
+    if (session) return session;
+    if (typeof ort === 'undefined') throw new Error('AI engine failed to load. Check your internet connection and refresh the page.');
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/';
+    let buf = null, cache = null;
+    try { cache = await caches.open('trolleraser-model-v1'); const r = await cache.match(MODEL_URL); if (r) buf = await r.arrayBuffer(); } catch {}
+    if (!buf){
+      $('aiStatus').textContent = 'Downloading AI model (first time only)…';
+      const r = await fetch(MODEL_URL);
+      if (!r.ok) throw new Error('Model download failed (' + r.status + ')');
+      const total = +r.headers.get('content-length') || MODEL_SIZE;
+      const reader = r.body.getReader(), parts = []; let got = 0;
+      for (;;){ const { done, value } = await reader.read(); if (done) break; parts.push(value); got += value.length;
+        setBar('aiBar', Math.min(1, got/total)); $('aiStatus').textContent = `Downloading AI model: ${(got/1048576).toFixed(0)} / ${(total/1048576).toFixed(0)} MB`; }
+      const all = new Uint8Array(got); let off = 0; for (const p of parts){ all.set(p, off); off += p.length; }
+      buf = all.buffer;
+      try { await cache?.put(MODEL_URL, new Response(buf.slice(0))); } catch {}
+    }
+    $('aiStatus').textContent = 'Preparing AI engine…'; setBar('aiBar', null);
+    session = await ort.InferenceSession.create(buf, { executionProviders:['wasm'] });
+    return session;
+  }
+
+  $('aiRun').onclick = async () => {
+    const W = aiBase.width, H = aiBase.height;
+    const m = mctx.getImageData(0,0,W,H).data;
+    let x0=W, y0=H, x1=-1, y1=-1;
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++) if (m[(y*W+x)*4+3] > 0){ if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; }
+    if (x1 < 0){ $('aiStatus').textContent = 'Paint over the watermark first.'; return; }
+    busy = true; updateAiButtons();
+    try {
+      const sess = await getSession();
+      $('aiStatus').textContent = '🧌 The troll is erasing… (this takes a few seconds)';
+      await new Promise(r => setTimeout(r, 30));
+      // crop window around the brushed area (at least 512px so small marks keep full detail)
+      const pad = Math.round(Math.max(24, ((x1-x0)+(y1-y0)) * 0.15));
+      const bwid = x1-x0+1+2*pad, bhei = y1-y0+1+2*pad;
+      const side = Math.max(bwid, bhei, LAMA);
+      const cw = Math.min(W, side), ch = Math.min(H, side);
+      const cx = Math.round((x0+x1)/2), cy = Math.round((y0+y1)/2);
+      const sx = Math.max(0, Math.min(W-cw, cx - (cw>>1))), sy = Math.max(0, Math.min(H-ch, cy - (ch>>1)));
+
+      const t = document.createElement('canvas'); t.width = t.height = LAMA; const tc = t.getContext('2d');
+      tc.drawImage(aiBase, sx, sy, cw, ch, 0, 0, LAMA, LAMA);
+      const ip = tc.getImageData(0,0,LAMA,LAMA).data;
+      tc.clearRect(0,0,LAMA,LAMA); tc.drawImage(aiMask, sx, sy, cw, ch, 0, 0, LAMA, LAMA);
+      const mp = tc.getImageData(0,0,LAMA,LAMA).data;
+      const N = LAMA*LAMA, img = new Float32Array(3*N), msk = new Float32Array(N);
+      for (let i=0;i<N;i++){ img[i]=ip[i*4]/255; img[N+i]=ip[i*4+1]/255; img[2*N+i]=ip[i*4+2]/255; msk[i] = mp[i*4+3] > 0 ? 1 : 0; }
+
+      const res = await sess.run({ image: new ort.Tensor('float32', img, [1,3,LAMA,LAMA]), mask: new ort.Tensor('float32', msk, [1,1,LAMA,LAMA]) });
+      const o = res[sess.outputNames[0]].data;
+      const big = o.length && Math.max(o[0], o[N>>1], o[N-1]) > 1.5 ? 1 : 255; // output is 0-255; guard if 0-1
+      const oid = new ImageData(LAMA, LAMA);
+      for (let i=0;i<N;i++){ const p=i*4; oid.data[p]=o[i]*big; oid.data[p+1]=o[N+i]*big; oid.data[p+2]=o[2*N+i]*big; oid.data[p+3]=255; }
+      tc.putImageData(oid, 0, 0);
+
+      // scale result back to crop size, paste only brushed pixels
+      const back = document.createElement('canvas'); back.width = cw; back.height = ch;
+      const bk = back.getContext('2d'); bk.drawImage(t, 0, 0, LAMA, LAMA, 0, 0, cw, ch);
+      const fill = bk.getImageData(0,0,cw,ch).data;
+      const before = bctx.getImageData(0,0,W,H);
+      undoStack.push(before); if (undoStack.length > 15) undoStack.shift();
+      const cur = bctx.getImageData(sx, sy, cw, ch), cd = cur.data;
+      for (let y=0;y<ch;y++) for (let x=0;x<cw;x++){
+        const a = m[((sy+y)*W + (sx+x))*4+3];
+        if (a > 0){ const p=(y*cw+x)*4; cd[p]=fill[p]; cd[p+1]=fill[p+1]; cd[p+2]=fill[p+2]; }
+      }
+      bctx.putImageData(cur, sx, sy);
+      mctx.clearRect(0,0,W,H);
+      $('aiStatus').textContent = '✅ Erased! Paint more areas and run again if needed.';
+    } catch(err){
+      console.error(err);
+      $('aiStatus').textContent = '⚠️ ' + (err.message || 'Something went wrong') + ' (Try Chrome or Edge on a computer.)';
+      setBar('aiBar', null);
+    }
+    busy = false; updateAiButtons();
+  };
+}
+</script>
+</body>
+</html>
